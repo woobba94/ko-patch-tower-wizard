@@ -15,15 +15,6 @@ function Get-Sha256([string]$Path) {
     }
 }
 
-function Get-BytesSha256([byte[]]$Bytes) {
-    $algorithm = [Security.Cryptography.SHA256]::Create()
-    try {
-        return ([BitConverter]::ToString($algorithm.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant()
-    } finally {
-        $algorithm.Dispose()
-    }
-}
-
 function Get-VdfField([string]$Vdf, [string]$Name) {
     $pattern = '(?m)^\s*"' + [regex]::Escape($Name) + '"\s*"([^"\r\n]*)"'
     $match = [regex]::Match($Vdf, $pattern)
@@ -129,25 +120,26 @@ function Select-Game {
 
 function Get-PckState($Game) {
     $hash = Get-Sha256 $Game.Pck
-    foreach ($build in $script:Catalog.builds) {
-        $status = ''
-        if ($hash -eq $build.base_sha256) { $status = 'stock' }
-        elseif ($hash -eq $build.patched_sha256) { $status = 'patched' }
-        elseif ($hash -in $build.legacy_sha256) { $status = 'legacy' }
-        if ($status) {
-            return [pscustomobject]@{
-                Status = $status
-                CurrentHash = $hash
-                Build = $build
-                Backup = $Game.Pck + '.ko-original.' + $build.base_sha256.Substring(0, 12)
-            }
-        }
+    $receipt = $Game.Pck + '.ko-receipt.' + $hash
+    $baseHash = $hash
+    $status = 'candidate'
+    if ([IO.File]::Exists($receipt)) {
+        if ([IO.FileInfo]::new($receipt).Length -ne 64) { throw '패치 적용 기록이 손상되었습니다.' }
+        $baseHash = [IO.File]::ReadAllText($receipt)
+        if ($baseHash -cnotmatch '\A[0-9a-f]{64}\z' -or $baseHash -eq $hash) { throw '패치 적용 기록이 손상되었습니다.' }
+        $status = 'patched'
+    } elseif ($hash -in $script:Catalog.legacy.patched_sha256) {
+        $baseHash = $script:Catalog.legacy.base_sha256
+        $status = 'legacy'
+    } elseif ($hash -eq $script:Catalog.legacy.base_sha256) {
+        $status = 'stock'
     }
-    $number = if ($Game.SteamBuild) { $Game.SteamBuild } else { '확인할 수 없음' }
-    throw ("미지원 설치본입니다. PCK가 현재 지원되는 원본 또는 패치와 일치하지 않습니다." +
-           "`n설치된 Steam 빌드 $number" +
-           "`n현재 PCK SHA-256 $hash" +
-           "`n메뉴 3에서 지원 빌드를 확인할 수 있습니다.")
+    return [pscustomobject]@{
+        Status = $status
+        CurrentHash = $hash
+        BaseHash = $baseHash
+        Backup = $Game.Pck + '.ko-original.' + $baseHash.Substring(0, 12)
+    }
 }
 
 function Assert-GameClosed($Game) {
@@ -226,26 +218,23 @@ function Read-ZipEntry($Zip, [string]$Name, [long]$Limit) {
     }
 }
 
-function Get-Bundle([string]$Path, $Build) {
+function Get-Bundle([string]$Path, $Package) {
     Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
     $stream = [IO.File]::OpenRead($Path)
     try {
-        if ((Get-Sha256 $Path) -ne $Build.archive_sha256) { throw '검증한 ZIP 파일이 변경되었습니다.' }
+        if ((Get-Sha256 $Path) -ne $Package.archive_sha256) { throw '검증한 ZIP 파일이 변경되었습니다.' }
         $zip = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Read, $true)
         try {
-            $raw = Read-ZipEntry $zip 'manifest.json' 1048576
-            $manifest = [Text.Encoding]::UTF8.GetString($raw) | ConvertFrom-Json
-            if ($manifest.schema -ne 2 -or $manifest.steam_build -ne $Build.steam_build -or
-                $manifest.base_sha256 -ne $Build.base_sha256 -or $manifest.patched_sha256 -ne $Build.patched_sha256) {
-                throw '배포 ZIP이 선택한 게임 빌드용이 아닙니다.'
-            }
-            $header = Read-ZipEntry $zip 'header.bin' 5242880
-            $literal = Read-ZipEntry $zip 'literal.bin' 33554432
+            $recipe = Read-ZipEntry $zip 'recipe.json' 4194304
             [void](Read-ZipEntry $zip 'Galmuri-OFL-1.1.txt' 65536)
-            if ((Get-BytesSha256 $header) -ne $manifest.header_sha256 -or (Get-BytesSha256 $literal) -ne $manifest.literal_sha256) {
-                throw '번역·글꼴 또는 PCK 헤더 데이터의 SHA-256이 다릅니다.'
+            [void](Read-ZipEntry $zip 'KeyDot-MIT.txt' 65536)
+            return [pscustomobject]@{
+                Recipe = [Text.Encoding]::UTF8.GetString($recipe)
+                Font9 = Read-ZipEntry $zip 'Galmuri9.res' 4194304
+                Font11 = Read-ZipEntry $zip 'Galmuri11.res' 4194304
+                Extra = Read-ZipEntry $zip 'extra.ko.translation' 131072
+                KeyDot = Read-ZipEntry $zip 'keydot.exe' 1048576
             }
-            return [pscustomobject]@{ Manifest = $manifest; Header = $header; Literal = $literal }
         } finally {
             $zip.Dispose()
         }
@@ -254,58 +243,31 @@ function Get-Bundle([string]$Path, $Build) {
     }
 }
 
-function Copy-BaseRange($Base, $Target, [long]$Offset, [long]$Length, [byte[]]$Buffer) {
-    if ($Offset -lt 0 -or $Length -lt 0 -or $Offset -gt $Base.Length - $Length) {
-        throw '패치 데이터의 원본 복사 범위가 올바르지 않습니다.'
-    }
-    $Base.Position = $Offset
-    while ($Length -gt 0) {
-        $read = $Base.Read($Buffer, 0, [int][Math]::Min($Length, $Buffer.Length))
-        if ($read -eq 0) { throw '원본 PCK를 읽는 중 파일이 끝났습니다.' }
-        $Target.Write($Buffer, 0, $read)
-        $Length -= $read
-    }
-}
-
-function Write-PatchedFile([string]$Original, [string]$Path, $Bundle, [string]$ExpectedSha) {
-    $base = [IO.File]::OpenRead($Original)
+function Get-GameKey($Game, $Bundle) {
+    $temporary = New-TempPath ([IO.Path]::GetTempPath()) '.exe'
     try {
-        $m = $Bundle.Manifest
-        if ($base.Length -ne $m.base_length -or $m.stock_tail_offset -lt 140 -or $m.stock_tail_offset -ge $base.Length) {
-            throw '원본 PCK 길이 또는 데이터 시작 위치가 일치하지 않습니다.'
-        }
-        $output = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $stream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
         try {
-            $buffer = [byte[]]::new(1048576)
-            $output.Write($Bundle.Header, 0, $Bundle.Header.Length)
-            Copy-BaseRange $base $output $m.stock_tail_offset ($base.Length - $m.stock_tail_offset) $buffer
-            foreach ($op in $m.operations) {
-                $offset = [long]$op.offset
-                $length = [long]$op.length
-                if ($op.source -eq 'base') {
-                    Copy-BaseRange $base $output $offset $length $buffer
-                } elseif ($op.source -eq 'literal' -and $offset -ge 0 -and $length -gt 0 -and $offset -le $Bundle.Literal.Length - $length) {
-                    $output.Write($Bundle.Literal, [int]$offset, [int]$length)
-                } else {
-                    throw '패치 데이터의 추가 범위가 올바르지 않습니다.'
-                }
-            }
-            $output.Flush($true)
+            $stream.Write($Bundle.KeyDot, 0, $Bundle.KeyDot.Length)
         } finally {
-            $output.Dispose()
+            $stream.Dispose()
         }
+        $lines = & $temporary $Game.Runtime
+        if ($LASTEXITCODE -ne 0) { throw 'KeyDot에서 게임 실행 파일의 PCK 키를 읽지 못했습니다.' }
+        $match = [regex]::Match(($lines -join ' '), '\b[a-fA-F0-9]{64}\b')
+        if (!$match.Success) { throw '게임 실행 파일의 PCK 키를 찾지 못했습니다.' }
+        return $match.Value
     } finally {
-        $base.Dispose()
+        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
     }
-    if ((Get-Sha256 $Path) -ne $ExpectedSha) { throw '조립한 PCK의 SHA-256이 예상과 다릅니다.' }
 }
 
 function Protect-Original($Game, $State) {
-    if (![IO.File]::Exists($State.Backup) -and $State.Status -eq 'stock') {
+    if (![IO.File]::Exists($State.Backup) -and ($State.Status -in 'stock', 'candidate')) {
         $temporary = New-TempPath $Game.Directory '.backup'
         try {
             [IO.File]::Copy($Game.Pck, $temporary)
-            if ((Get-Sha256 $temporary) -ne $State.Build.base_sha256) { throw '백업한 원본 PCK가 예상과 다릅니다.' }
+            if ((Get-Sha256 $temporary) -ne $State.BaseHash) { throw '백업한 원본 PCK가 예상과 다릅니다.' }
             [IO.File]::Move($temporary, $State.Backup)
         } finally {
             if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
@@ -314,8 +276,23 @@ function Protect-Original($Game, $State) {
     if (![IO.File]::Exists($State.Backup)) {
         throw "원본 백업을 찾을 수 없습니다. $($State.Backup)"
     }
-    if ((Get-Sha256 $State.Backup) -ne $State.Build.base_sha256) {
+    if ((Get-Sha256 $State.Backup) -ne $State.BaseHash) {
         throw "원본 백업이 손상되었거나 다른 빌드입니다. $($State.Backup)"
+    }
+}
+
+function Register-Patch($Game, $State, [string]$PatchedHash) {
+    $receipt = $Game.Pck + '.ko-receipt.' + $PatchedHash
+    if ([IO.File]::Exists($receipt)) {
+        if ([IO.File]::ReadAllText($receipt) -cne $State.BaseHash) { throw '동일한 패치의 적용 기록이 현재 백업과 다릅니다.' }
+        return
+    }
+    $temporary = New-TempPath $Game.Directory '.receipt'
+    try {
+        [IO.File]::WriteAllText($temporary, $State.BaseHash, [Text.Encoding]::ASCII)
+        [IO.File]::Move($temporary, $receipt)
+    } finally {
+        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
     }
 }
 
@@ -327,21 +304,39 @@ function Invoke-PatchChange($Game, [bool]$Restore) {
     try {
         $state = Get-PckState $Game
         Write-Host "설치 경로 $($Game.Directory)"
-        Write-Host "지원 Steam 빌드 $($state.Build.steam_build) · 게임 $($state.Build.game_version)"
+        if ($Game.SteamBuild) { Write-Host "설치된 Steam 빌드 $($Game.SteamBuild)" }
         if ($Restore) {
-            if ($state.Status -eq 'stock') {
-                Write-Host '이미 원본 상태입니다.' -ForegroundColor Green
+            if ($state.Status -in 'stock', 'candidate') {
+                Write-Host '현재 PCK에 적용 기록이 없어 파일을 그대로 두었습니다.'
                 return
             }
             Protect-Original $Game $state
             [IO.File]::Copy($state.Backup, $temporary)
-            if ((Get-Sha256 $temporary) -ne $state.Build.base_sha256) { throw '복구용 원본 사본이 손상되었습니다.' }
+            if ((Get-Sha256 $temporary) -ne $state.BaseHash) { throw '복구용 원본 사본이 손상되었습니다.' }
         } else {
-            $archive = Get-VerifiedArchive $state.Build
-            $bundle = Get-Bundle $archive $state.Build
+            $archive = Get-VerifiedArchive $script:Catalog.package
+            $bundle = Get-Bundle $archive $script:Catalog.package
+            Assert-CurrentPck $Game $state
+            $original = $Game.Pck
+            if ($state.Status -in 'patched', 'legacy') {
+                Protect-Original $Game $state
+                $original = $state.Backup
+            }
+            try {
+                $key = Get-GameKey $Game $bundle
+                if (!('TowerWizardKorean.Installer' -as [type])) {
+                    Add-Type -TypeDefinition $script:InstallerSource -ReferencedAssemblies 'System.dll','System.Core.dll','System.Web.Extensions.dll'
+                }
+                $english = [TowerWizardKorean.Installer]::Build($original, $temporary, $key, $bundle.Recipe,
+                    $bundle.Font9, $bundle.Font11, $bundle.Extra)
+            } catch {
+                $details = $_.Exception.GetBaseException().Message
+                throw ("이 설치본에서 번역 리소스의 호환성을 확인하지 못했습니다. 게임 파일은 그대로입니다." +
+                    [Environment]::NewLine + "현재 PCK SHA-256 $($state.CurrentHash)" + [Environment]::NewLine + $details)
+            }
             Assert-CurrentPck $Game $state
             Protect-Original $Game $state
-            Write-PatchedFile $state.Backup $temporary $bundle $state.Build.patched_sha256
+            Register-Patch $Game $state (Get-Sha256 $temporary)
         }
         Assert-CurrentPck $Game $state
         [IO.File]::Replace($temporary, $Game.Pck, [NullString]::Value)
@@ -349,6 +344,9 @@ function Invoke-PatchChange($Game, [bool]$Restore) {
             Write-Host '원본 PCK를 복구했습니다.' -ForegroundColor Green
         } else {
             Write-Host '한국어 패치를 적용했습니다. Steam에서 게임을 실행하면 됩니다.' -ForegroundColor Green
+            if ($english -gt 0) {
+                Write-Host "원문이 달라졌거나 번역을 확인할 수 없는 ${english}개 항목은 영어로 표시합니다."
+            }
         }
         Write-Host "원본 백업 $($state.Backup)"
     } finally {
@@ -357,19 +355,18 @@ function Invoke-PatchChange($Game, [bool]$Restore) {
     }
 }
 
-function Show-SupportedBuilds {
-    Write-Host "`nCMD 릴리스 $($script:Catalog.tag)"
-    foreach ($build in $script:Catalog.builds) {
-        Write-Host "Steam 빌드 $($build.steam_build) · 게임 $($build.game_version)"
-        Write-Host "  원본 PCK SHA-256 $($build.base_sha256)"
-    }
+function Show-Compatibility {
+    Write-Host 'Steam 빌드 번호와 관계없이 설치 과정에서 번역 리소스의 호환성을 확인합니다.'
+    Write-Host "실행 검증을 마친 Steam 빌드 $($script:Catalog.legacy.steam_build)"
     $games = if ($env:TWKO_EXPLICIT_GAME) { Get-GameLocation $env:TWKO_EXPLICIT_GAME '' } else { Find-SteamGames @(Get-SteamRoots) }
     foreach ($game in $games) {
         Write-Host "감지된 설치 경로 $($game.Directory)"
+        if ($game.SteamBuild) { Write-Host "설치된 Steam 빌드 $($game.SteamBuild)" }
         try {
             $state = Get-PckState $game
-            $labels = @{ stock = '지원되는 원본'; patched = '한국어 적용됨'; legacy = '이전 한국어 패치 적용됨' }
+            $labels = @{ stock = '검증된 원본'; patched = '한국어 적용됨'; legacy = '이전 한국어 패치 적용됨'; candidate = '한국어 적용 시 호환성을 확인합니다.' }
             Write-Host "  $($labels[$state.Status])"
+            Write-Host "  현재 PCK SHA-256 $($state.CurrentHash)"
         } catch {
             Write-Host $_.Exception.Message
         }
@@ -382,12 +379,12 @@ function Invoke-Menu {
         Write-Host "`nTower Wizard 비공식 한국어 패치 $($script:Catalog.tag)"
         Write-Host '1. 한국어 적용 / 재설치'
         Write-Host '2. 원본 복구'
-        Write-Host '3. 지원 빌드 확인'
+        Write-Host '3. 설치 상태 확인'
         Write-Host '0. 종료'
         $choice = Read-Choice '번호 선택'
         if ($null -eq $choice -or $choice.Trim() -eq '0') { return $exitCode }
         switch ($choice.Trim()) {
-            '3' { Show-SupportedBuilds }
+            '3' { Show-Compatibility }
             { $_ -in '1', '2' } {
                 try {
                     $game = Select-Game
