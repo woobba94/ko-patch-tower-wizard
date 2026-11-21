@@ -1,0 +1,9 @@
+# Generated CMD and builds.json are tracked. Release assets and local QA stay here.
+dist/
+work/
+__pycache__/
+*.pyc
+*.pck
+*.pck.ko-original.*
+*.exe
+*.dll

@@ -1,0 +1,17 @@
+{
+  "tag": "v1.0.0",
+  "release_base": "https://github.com/woobba94/ko-patch-tower-wizard/releases/download/v1.0.0/",
+  "builds": [
+    {
+      "game_version": "1.0.5",
+      "steam_build": 23289626,
+      "base_sha256": "283fe09ff8481568e31ca73127d61fac71be2fdff09c159604e5c09048f9e083",
+      "patched_sha256": "493e66f321a131ee7626c8d6f1c182add4162e0ad2f1247c664a3f554aa36ef1",
+      "legacy_sha256": [
+        "e18ef596102a416dde92453faf5be54aadd022a03447c86abbefa6447582b312"
+      ],
+      "archive": "tower-wizard-ko-steam-23289626.zip",
+      "archive_sha256": "39a36bd7ca75d911a5e6a861e00ac5106e1ddfed3acc38dc7c38a2996be5cb19"
+    }
+  ]
+}
