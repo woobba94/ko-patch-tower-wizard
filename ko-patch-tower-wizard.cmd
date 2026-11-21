@@ -15,12 +15,12 @@ $script:Catalog = @'
       "game_version": "1.0.5",
       "steam_build": 23289626,
       "base_sha256": "283fe09ff8481568e31ca73127d61fac71be2fdff09c159604e5c09048f9e083",
-      "patched_sha256": "493e66f321a131ee7626c8d6f1c182add4162e0ad2f1247c664a3f554aa36ef1",
+      "patched_sha256": "565fa0e4ab739e1f8453e3094b125b5c3a859754cfa8a92779752b44b623b379",
       "legacy_sha256": [
         "e18ef596102a416dde92453faf5be54aadd022a03447c86abbefa6447582b312"
       ],
       "archive": "tower-wizard-ko-steam-23289626.zip",
-      "archive_sha256": "39a36bd7ca75d911a5e6a861e00ac5106e1ddfed3acc38dc7c38a2996be5cb19"
+      "archive_sha256": "48052f5372871b307e0feb6f1fcf3c10af471f4fc6b2599cb6cd3e6d461c8e58"
     }
   ]
 }
