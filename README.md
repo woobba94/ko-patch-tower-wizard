@@ -2,6 +2,12 @@
 
 Steam판 Tower Wizard의 메뉴, 설정, 툴팁, 튜토리얼, 대사와 엔딩을 한국어로 표시합니다. 원작 개발사와 Steam의 공식 패치와는 별개인 팬 번역입니다.
 
+## v1.0.1 변경 사항
+
+- 룬 제작 게이지, 용 능력 일괄 강화, 탑 증축에 맞춰 안내를 수정했습니다.
+- 건설 자원의 회차 내 누적, 용 여왕의 경험치, 외교관 복귀 조건, 서리와 파쇄의 작동을 설명하는 툴팁을 다듬었습니다.
+- 마력금, 포인트, 비전술 의식장 등 여러 화면에서 반복되는 용어와 구슬·벽의 마법사 대사를 정리했습니다.
+
 ## 다운로드
 
 Windows에서 [ko-patch-tower-wizard.cmd 다운로드](https://github.com/woobba94/ko-patch-tower-wizard/releases/latest/download/ko-patch-tower-wizard.cmd) 링크로 받은 파일 하나를 실행합니다. Steam 설치 폴더는 자동으로 찾습니다.
